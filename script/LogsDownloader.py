@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Author:       Doron Lehmann, Incapsula, Inc.
 # Date:         2015
@@ -52,8 +52,11 @@ import zlib
 from logging import handlers
 import socket
 
-import M2Crypto
-from Crypto.Cipher import AES
+from cryptography.hazmat.primitives import asymmetric
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+
 
 """
 Main class for downloading log files
@@ -66,10 +69,7 @@ class LogsDownloader:
     running = True
 
     def __init__(self, config_path, system_log_path, log_level):
-        # Add by Maytee Sittipornchaisakul
-        # set default output syslog
-        self.setOutputSyslogHandler = False
-    	# set a log file for the downloader
+        # set a log file for the downloader
         self.logger = logging.getLogger("logsDownloader")
         # default log directory for the downloader
         log_dir = system_log_path
@@ -147,13 +147,12 @@ class LogsDownloader:
                     # if we successfully handled the next log file
                     if success:
                         self.logger.debug("Successfully handled file %s, updating the last known downloaded file id", next_file)
-
+                        # set the last handled log file information
+                        self.last_known_downloaded_file_id.move_to_next_file()
                         if self.running:
                             self.logger.info("Sleeping for 2 seconds before fetching the next logs file")
                             retries = 0
                             time.sleep(2)
-                            # set the last handled log file information
-                            self.last_known_downloaded_file_id.move_to_next_file()                            
 
                     # we failed to handle the next log file
                     else:
@@ -257,7 +256,6 @@ class LogsDownloader:
     """
     def handle_log_decrypted_content(self, filename, decrypted_file):
         decrypted_file = decrypted_file.decode('utf-8')
-
         if self.config.SYSLOG_ENABLE == 'YES':
             syslogger = logging.getLogger("syslog")
             syslogger.setLevel(logging.INFO)
@@ -268,12 +266,7 @@ class LogsDownloader:
             else:
                 self.logger.info('Syslog enabled, using UDP')
                 syslog = logging.handlers.SysLogHandler(address=(self.config.SYSLOG_ADDRESS, int(self.config.SYSLOG_PORT)))
-            
-            ### Add by Maytee Sittipornchaisakul
-            if not self.setOutputSyslogHandler:
-                syslogger.addHandler(syslog)
-                self.setOutputSyslogHandler = True                
-            
+            syslogger.addHandler(syslog)
             for msg in decrypted_file.splitlines():
                 if msg != '':
                     try:
@@ -297,14 +290,9 @@ class LogsDownloader:
         file_log_content = file_split_content[1]
         # if the file is not encrypted - the "key" value in the file header is '-1'
         file_encryption_key = file_header_content.find("key:")
-
         if file_encryption_key == -1:
             # uncompress the log content
-            try:
-                uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(file_log_content)
-            except zlib.error:
-                uncompressed_and_decrypted_file_content = file_log_content
-                
+            uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(file_log_content)
         # if the file is encrypted
         else:
             content_encrypted_sym_key = file_header_content.split("key:")[1].splitlines()[0]
@@ -323,14 +311,29 @@ class LogsDownloader:
                 raise Exception("Failed to find a proper certificate")
             # get the checksum
             checksum = file_header_content.split("checksum:")[1].splitlines()[0]
-            # get the private key
-            private_key = bytes(open(os.path.join(public_key_directory, "Private.key"), "r").read(), 'utf-8')
+            with open(os.path.join(public_key_directory, "Private.key"), "rb") as key_file:
+                rsa_private_key = load_pem_private_key(
+                    key_file.read(),
+                    password=None,
+                )
             try:
-                rsa_private_key = M2Crypto.RSA.load_key_string(private_key)
-                content_decrypted_sym_key = rsa_private_key.private_decrypt(base64.b64decode(bytes(content_encrypted_sym_key, 'utf-8')), M2Crypto.RSA.pkcs1_padding)
-                uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(AES.new(base64.b64decode(bytearray(content_decrypted_sym_key)), AES.MODE_CBC, 16 * "\x00").decrypt(file_log_content))
+                # decrypt the symmetric key
+                content_decrypted_sym_key = rsa_private_key.decrypt(
+                    base64.b64decode(bytes(content_encrypted_sym_key, 'utf-8')),
+                    asymmetric.padding.PKCS1v15()
+                )
+
+                # create an AES cipher using the decrypted symmetric key
+                cipher = Cipher(algorithms.AES(base64.b64decode(bytearray(content_decrypted_sym_key))), modes.CBC(16 * b'\x00'))
+                # create a decryptor
+                decryptor = cipher.decryptor()
+
+                # decrypt the file content
+                uncompressed_and_decrypted_file_content = zlib.decompressobj().decompress(decryptor.update(file_log_content) + decryptor.finalize())
+                
                 # we check the content validity by checking the checksum
                 content_is_valid = self.validate_checksum(checksum, uncompressed_and_decrypted_file_content)
+
                 if not content_is_valid:
                     self.logger.error("Checksum verification failed for file %s", filename)
                     raise Exception("Checksum verification failed")

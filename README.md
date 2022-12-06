@@ -16,10 +16,10 @@
 
 > This script requires Python 3
 
-The script has the following pythondependencies that may require additional installation modules, according to the operating system that is used. 
+The script has the following python dependencies that may require additional installation modules, according to the operating system that is used. 
 
-- **pycrypto**
-- **M2Crypto**
+- **urllib3**
+- **cryptography**
 
 A requirements.txt file is included in the script directory, so that the following can be used to install requirements and dependencies:
 
