@@ -1,3 +1,2 @@
-pycrypto
-M2Crypto
+cryptography
 urllib3
